@@ -122,6 +122,26 @@ test('a missing workspace reports a load failure without publishing diagnostics'
         message.method === 'textDocument/publishDiagnostics' && message.params.uri === client.uri), false);
 });
 
+test('recovers from invalid rules without another document change', { timeout: 30000 }, async t => {
+    const client = await startServer(t);
+    const invalidRule = path.join(client.settings.rules_folder, 'invalid.cwt');
+    await writeFile(invalidRule, '## severity = impossible\ntest = scalar\n');
+    const from = client.received.length;
+    client.send('workspace/didChangeConfiguration', { settings: { cwtools: client.settings } });
+    client.send('textDocument/didOpen', {
+        textDocument: { uri: client.uri, languageId: 'plaintext', version: 1, text: 'country_event = {' },
+    });
+    await client.waitFor(message => message.method === 'window/logMessage'
+        && message.params.message.includes('Workspace loading failed'), from);
+    assert.equal(client.received.slice(from).some(message =>
+        message.method === 'textDocument/publishDiagnostics' && message.params.uri === client.uri), false);
+    await rm(invalidRule);
+    client.send('workspace/didChangeConfiguration', { settings: { cwtools: client.settings } });
+    const diagnostic = await client.waitFor(message => message.method === 'textDocument/publishDiagnostics'
+        && message.params.uri === client.uri, from);
+    assert.ok(diagnostic.message.params.diagnostics.some(item => item.code === 'CW001'));
+});
+
 test('reconfiguration rechecks the open buffer without another document change', { timeout: 30000 }, async t => {
     const client = await startServer(t);
     client.send('workspace/didChangeConfiguration', { settings: { cwtools: client.settings } });
