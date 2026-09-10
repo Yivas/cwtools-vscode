@@ -1774,13 +1774,12 @@ let main (_: array<string>) : int =
     System.Threading.Thread.CurrentThread.CurrentCulture <- cultureInfo
     System.Threading.Thread.CurrentThread.CurrentUICulture <- cultureInfo
     // CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
-    let read = new BinaryReader(Console.OpenStandardInput())
-    let write = new BinaryWriter(Console.OpenStandardOutput())
+    use read = new BinaryReader(Console.OpenStandardInput())
+    use write = new BinaryWriter(Console.OpenStandardOutput())
     let serverFactory client = Server(client) :> ILanguageServer
     // "Listening on stdin"
     try
         LanguageServer.connect (serverFactory, read, write)
-        0 // return an integer exit code
     with e ->
         Log.dprintfn $"Exception in language server {e}"
         1

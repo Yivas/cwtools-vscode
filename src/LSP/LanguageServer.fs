@@ -239,11 +239,18 @@ type private PendingTask =
 
 let connect (serverFactory: ILanguageClient -> ILanguageServer, receive: BinaryReader, send: BinaryWriter) =
     let server = serverFactory (RealClient(send))
+    let mutable shutdownCompleted = false
+    let mutable inputFailed = false
 
     let processRequest (request: Request) : Async<string option> =
         match request with
         | Initialize(p) -> server.Initialize(p) |> thenMap serializeInitializeResult |> thenSome
-        | Shutdown -> server.Shutdown() |> thenMap serializeShutdownResponse |> thenSome
+        | Shutdown ->
+            async {
+                let! result = server.Shutdown()
+                shutdownCompleted <- true
+                return Some(serializeShutdownResponse result)
+            }
         | WillSaveWaitUntilTextDocument(p) ->
             server.WillSaveWaitUntilTextDocument(p)
             |> thenMap serializeTextEditList
@@ -299,9 +306,9 @@ let connect (serverFactory: ILanguageClient -> ILanguageServer, receive: BinaryR
     let processQueue =
         new System.Collections.Concurrent.BlockingCollection<PendingTask>(10)
 
-    Thread(fun () ->
+    let readInput () =
         try
-            // Read all messages on the main thread
+            // Read messages independently so cancellations can interrupt requests.
             for m in readMessages receive do
                 // Process cancellations immediately
                 match m with
@@ -327,11 +334,15 @@ let connect (serverFactory: ILanguageClient -> ILanguageServer, receive: BinaryR
                     pendingRequests[id] <- cancel
                 | Parser.ResponseMessage(id, result) -> responseAgent.Post(Response(id, result))
 
-            processQueue.Add(Quit)
         with e ->
+            inputFailed <- true
             dprintfn $"Exception in read thread {e}"
 
-    )
+    Thread(fun () ->
+        try
+            readInput ()
+        finally
+            processQueue.Add(Quit))
         .Start()
     // Process messages on main thread
     let mutable quit = false
@@ -354,4 +365,4 @@ let connect (serverFactory: ILanguageClient -> ILanguageServer, receive: BinaryR
             //dprintfn "Request %d was cancelled" id
             pendingRequests.TryRemove(id) |> ignore
 
-    Environment.Exit(1)
+    if shutdownCompleted && not inputFailed then 0 else 1
