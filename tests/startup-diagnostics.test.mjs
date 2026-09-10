@@ -5,7 +5,7 @@ import test from 'node:test';
 import { startServer } from './helpers/lsp-client.mjs';
 
 test('a missing workspace reports a load failure without publishing diagnostics', { timeout: 30000 }, async t => {
-    const client = await startServer(t, true);
+    const client = await startServer(t, { noRoot: true });
     const from = client.received.length;
     client.send('workspace/didChangeConfiguration', { settings: { cwtools: client.settings } });
     client.send('textDocument/didOpen', {

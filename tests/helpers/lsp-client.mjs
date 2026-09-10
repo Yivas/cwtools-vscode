@@ -10,7 +10,7 @@ const server = process.env.CWTOOLS_SERVER
     ? path.resolve(process.env.CWTOOLS_SERVER)
     : fileURLToPath(new URL('../../artifacts/bin/Main/release/CWTools Server.dll', import.meta.url));
 
-export async function startServer(t, noRoot = false) {
+export async function startServer(t, { noRoot = false, initialize = true } = {}) {
     const root = await mkdtemp(path.join(os.tmpdir(), 'cwtools-startup-'));
     const events = path.join(root, 'events');
     const rules = path.join(root, 'rules');
@@ -89,7 +89,7 @@ export async function startServer(t, noRoot = false) {
             check();
         });
     }
-    send('initialize', {
+    const initialization = {
         processId: process.pid,
         rootUri: noRoot ? null : pathToFileURL(root).href,
         capabilities: {},
@@ -97,9 +97,7 @@ export async function startServer(t, noRoot = false) {
             language: 'eu4', isVanillaFolder: true, rulesCache: null,
             repoPath: null, rules_version: 'manual', diagnosticLogging: false,
         },
-    }, 1);
-    await waitFor(message => message.id === 1);
-    send('initialized', {});
+    };
     const settings = {
         localisation: { languages: ['english'], generated_strings: '' },
         errors: { vanilla: false, ignore: [], ignorefiles: [] },
@@ -107,5 +105,10 @@ export async function startServer(t, noRoot = false) {
         trace: { server: 'off' }, maxFileSize: 2, rules_folder: rules,
         cache: Object.fromEntries(['eu4', 'stellaris', 'hoi4', 'ck2', 'imperator', 'vic2', 'ck3', 'vic3', 'eu5'].map(game => [game, ''])),
     };
-    return { send, waitFor, received, settings, root, child, closed, uri: pathToFileURL(file).href };
+    if (initialize) {
+        send('initialize', initialization, 1);
+        await waitFor(message => message.id === 1);
+        send('initialized', {});
+    }
+    return { send, waitFor, received, settings, initialization, root, child, closed, uri: pathToFileURL(file).href };
 }

@@ -126,6 +126,17 @@ type Server(client: ILanguageClient) =
 
     let mutable currentlyRefreshingFiles: bool = false
     let mutable workspaceLoad: Task = Task.CompletedTask
+    let mutable initialConfiguration: JsonValue option = None
+
+    let rec normalizeConfiguration = function
+        | JsonValue.Record properties ->
+            properties
+            |> Array.sortBy fst
+            |> Array.map (fun (key, value) -> key, normalizeConfiguration value)
+            |> JsonValue.Record
+        | JsonValue.Array values -> values |> Array.map normalizeConfiguration |> JsonValue.Array
+        | value -> value
+
     let workspaceAccess = new System.Threading.SemaphoreSlim(1, 1)
 
     let (|TrySuccess|TryFailure|) tryResult =
@@ -834,6 +845,17 @@ type Server(client: ILanguageClient) =
 
                 logInfo $"New init %s{p.ToString()}"
 
+                match p.initializationOptions with
+                | Some options ->
+                    match options.TryGetProperty("cwtools") with
+                    | Some config ->
+                        initialConfiguration <- None
+                        do! (this :> ILanguageServer).DidChangeConfiguration { settings = options }
+                        do! workspaceLoad |> Async.AwaitTask
+                        initialConfiguration <- Some(normalizeConfiguration config)
+                    | None -> ()
+                | None -> ()
+
                 return
                     { capabilities =
                         { defaultServerCapabilities with
@@ -875,7 +897,7 @@ type Server(client: ILanguageClient) =
         member this.Shutdown() = async { return None }
 
         member this.DidChangeConfiguration(p: DidChangeConfigurationParams) =
-            async {
+            let applyConfiguration () = async {
                 let config = p.settings.Item("cwtools")
 
                 let newLanguages =
@@ -1138,6 +1160,18 @@ type Server(client: ILanguageClient) =
 
                 let task = new Task(fun () -> setupRulesCaches ())
                 task.Start()
+            }
+
+            async {
+                let config = p.settings.Item("cwtools")
+                let alreadyLoaded =
+                    initialConfiguration
+                    |> Option.exists (fun initial -> initial = normalizeConfiguration config)
+
+                // Generic clients can send these same settings again after initialize.
+                initialConfiguration <- None
+                if not alreadyLoaded then
+                    do! applyConfiguration ()
             }
 
         member this.DidOpenTextDocument(p: DidOpenTextDocumentParams) =
