@@ -125,6 +125,8 @@ type Server(client: ILanguageClient) =
     let mutable lastFocusedFile: string option = None
 
     let mutable currentlyRefreshingFiles: bool = false
+    let mutable workspaceLoad: Task = Task.CompletedTask
+    let workspaceAccess = new System.Threading.SemaphoreSlim(1, 1)
 
     let (|TrySuccess|TryFailure|) tryResult =
         match tryResult with
@@ -205,8 +207,24 @@ type Server(client: ILanguageClient) =
 
     let mutable delayedLocUpdate = false
 
-    let lint (doc: Uri) (shallowAnalyze: bool) (forceDisk: bool) : Async<unit> =
+    let rec withLoadedWorkspace action =
         async {
+            let loading = workspaceLoad
+            do! loading |> Async.AwaitTask
+            do! workspaceAccess.WaitAsync() |> Async.AwaitTask
+
+            if Object.ReferenceEquals(loading, workspaceLoad) then
+                try
+                    return! action ()
+                finally
+                    workspaceAccess.Release() |> ignore
+            else
+                workspaceAccess.Release() |> ignore
+                return! withLoadedWorkspace action
+        }
+
+    let lint (doc: Uri) (shallowAnalyze: bool) (forceDisk: bool) : Async<unit> =
+        withLoadedWorkspace (fun () -> async {
             let name =
                 if
                     RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
@@ -266,7 +284,7 @@ type Server(client: ILanguageClient) =
             match errors with
             | [] -> client.PublishDiagnostics { uri = doc; diagnostics = [] }
             | x -> x |> List.map parserErrorToDiagnostics |> sendDiagnostics
-        }
+        })
 
     let mutable delayTime = TimeSpan(0, 0, 30)
 
@@ -316,7 +334,9 @@ type Server(client: ILanguageClient) =
                             lint uri (shallowAnalyse && (not force)) false |> Async.RunSynchronously
 
                             if not shallowAnalyse then
-                                delayedAnalyze ()
+                                withLoadedWorkspace (fun () -> async { delayedAnalyze () })
+                                |> Async.RunSynchronously
+
                                 logDiag "lint after delayed"
                                 // Somehow get updated localisation errors after loccache is updated
                                 lint uri true false |> Async.RunSynchronously
@@ -543,6 +563,7 @@ type Server(client: ILanguageClient) =
         | _ -> logInfo "No cache path"
 
     let processWorkspace (uri: option<Uri>) =
+        let mutable loaded = false
         client.CustomNotification(
             "loadingBar",
             JsonValue.Record
@@ -678,6 +699,7 @@ type Server(client: ILanguageClient) =
 
                 valErrors @ locErrors |> List.map parserErrorToDiagnostics |> sendDiagnostics
                 GC.Collect()
+                loaded <- true
             with e ->
                 eprintfn $"%A{e}"
 
@@ -687,6 +709,8 @@ type Server(client: ILanguageClient) =
             "loadingBar",
             JsonValue.Record [| "value", JsonValue.String(""); "enable", JsonValue.Boolean(false) |]
         )
+
+        loaded
 
     let createRange startLine startCol endLine endCol =
         { start =
@@ -1085,12 +1109,33 @@ type Server(client: ILanguageClient) =
                         Directory.CreateDirectory dir |> ignore
                 | _ -> ()
 
-                let task =
-                    new Task(fun () ->
-                        checkOrSetGameCache false
-                        processWorkspace rootUri)
+                let openedDocuments =
+                    docs.OpenFiles()
+                    |> List.choose (fun file ->
+                        docs.GetVersion(file)
+                        |> Option.map (fun version ->
+                            { VersionedTextDocumentIdentifier.uri = Uri(file.FullName)
+                              version = version }))
 
-                task.Start()
+                // Serialize reloads; a new configuration can retry even if the previous load failed.
+                workspaceLoad <-
+                    workspaceLoad.ContinueWith(
+                        (fun (_: Task) ->
+                            workspaceAccess.Wait()
+
+                            try
+                                checkOrSetGameCache false
+
+                                if not (processWorkspace rootUri) then
+                                    failwith "Workspace loading failed; see the server log for details."
+
+                                for document in openedDocuments do
+                                    lintAgent.Post(UpdateRequest(document, true))
+                            finally
+                                workspaceAccess.Release() |> ignore),
+                        TaskScheduler.Default
+                    )
+
                 let task = new Task(fun () -> setupRulesCaches ())
                 task.Start()
             }
