@@ -1376,19 +1376,19 @@ type Server(client: ILanguageClient) =
                             else
                                 u.LocalPath
 
-                        let gototype =
-                            game.FindAllRefs
-                                position
-                                path
-                                (docs.GetText(FileInfo(p.textDocument.uri.LocalPath)) |> Option.defaultValue "")
+                        let text = docs.GetText(FileInfo(p.textDocument.uri.LocalPath)) |> Option.defaultValue ""
+                        let references = game.FindAllRefs position path text |> Option.defaultValue []
+                        let declarations =
+                            if p.context.includeDeclaration then
+                                game.GoToType position path text |> Option.toList
+                            else
+                                []
 
-                        match gototype with
-                        | Some gotos ->
-                            gotos
-                            |> List.map (fun goto ->
-                                { uri = Uri(goto.FileName)
-                                  range = (convRangeToLSPRange goto) })
-                        | None -> []
+                        references @ declarations
+                        |> List.map (fun location ->
+                            { uri = Uri(location.FileName)
+                              range = convRangeToLSPRange location })
+                        |> List.distinct
                     | None -> []
             }
             |> catchError []
