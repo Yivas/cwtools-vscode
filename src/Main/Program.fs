@@ -115,6 +115,9 @@ type Server(client: ILanguageClient) =
     let mutable maxFileSize: int = 2
     let mutable generatedStrings: string = ":0 \"REPLACE_ME\""
     let mutable clientSupportsInsertReplaceEdit: bool = false
+    let mutable localisationOutputWorkspaceEdit = false
+    let mutable clientSupportsLocalisationEdit = false
+    let mutable workspaceRootPath: string option = None
 
     let mutable ignoreCodes: string array = [||]
     let mutable ignoreFiles: string array = [||]
@@ -602,6 +605,7 @@ type Server(client: ILanguageClient) =
                     u.LocalPath
 
             try
+                workspaceRootPath <- Some path
                 let serverSettings =
                     { cachePath = cachePath
                       useManualRules = useManualRules
@@ -772,6 +776,68 @@ type Server(client: ILanguageClient) =
 
         memoize id inner path
 
+    let generateLocalisationEdit fileName keys =
+        let warn message =
+            client.ShowMessage { ``type`` = MessageType.Warning; message = message }
+
+        match workspaceRootPath with
+        | None -> warn "Open a workspace before generating localisation."
+        | Some root when not clientSupportsLocalisationEdit ->
+            warn "The client must support workspace edits, document changes and file creation."
+        | Some root when activeGame = CK2 ->
+            warn "Workspace edit generation is not available for CK2 CSV localisation."
+        | Some root when not (languages |> Array.exists (fun lang -> lang.ToString().EndsWith("English"))) ->
+            warn "Workspace edit generation currently requires English localisation."
+        | Some root ->
+            let folder = Path.Combine(root, "localisation")
+            let destination = Path.Combine(folder, fileName + "_l_english.yml")
+
+            if not (Directory.Exists folder) then
+                warn "Create the localisation folder in the workspace before generating a file."
+            elif File.Exists destination || Directory.Exists destination then
+                warn "The generated localisation file already exists; no file was changed."
+            elif List.isEmpty keys then
+                warn "No missing localisation keys were found."
+            else
+                let uri = Uri(destination).AbsoluteUri
+                let position = JsonValue.Record [| "line", JsonValue.Number 0M; "character", JsonValue.Number 0M |]
+                let text = "\uFEFFl_english:" + Environment.NewLine + String.Join(Environment.NewLine, keys) + Environment.NewLine
+                let create =
+                    JsonValue.Record
+                        [| "kind", JsonValue.String "create"
+                           "uri", JsonValue.String uri
+                           "options", JsonValue.Record [| "overwrite", JsonValue.Boolean false; "ignoreIfExists", JsonValue.Boolean false |] |]
+                let change =
+                    JsonValue.Record
+                        [| "textDocument", JsonValue.Record [| "uri", JsonValue.String uri; "version", JsonValue.Null |]
+                           "edits", JsonValue.Array [| JsonValue.Record
+                                [| "range", JsonValue.Record [| "start", position; "end", position |]
+                                   "newText", JsonValue.String text |] |] |]
+                // The typed WorkspaceEdit cannot represent a CreateFile followed by a text edit.
+                let parameters =
+                    JsonValue.Record
+                        [| "label", JsonValue.String "Generate localisation"
+                           "edit", JsonValue.Record [| "documentChanges", JsonValue.Array [| create; change |] |] |]
+
+                try
+                    let response =
+                        client.CustomRequest("workspace/applyEdit", parameters.ToString(JsonSaveOptions.DisableFormatting))
+                        |> fun request -> Async.RunSynchronously(request, 30000)
+
+                    match response with
+                    | JsonValue.Record _ ->
+                        match response.TryGetProperty("applied") with
+                        | Some(JsonValue.Boolean true) -> ()
+                        | _ ->
+                            let reason =
+                                match response.TryGetProperty("failureReason") with
+                                | Some(JsonValue.String text) -> " " + text
+                                | _ -> ""
+                            warn ("The client did not apply the localisation edit." + reason)
+                    | _ -> warn "The client did not apply the localisation edit."
+                with :? TimeoutException ->
+                    warn "The client did not answer the localisation edit request."
+
     interface ILanguageServer with
         member this.Initialize(p: InitializeParams) =
             async {
@@ -783,8 +849,17 @@ type Server(client: ILanguageClient) =
                     p.capabilitiesMap.ContainsKey("textDocument.completion.completionItem.insertReplaceSupport")
                     && p.capabilitiesMap.["textDocument.completion.completionItem.insertReplaceSupport"]
 
+                let supports capability = p.capabilitiesMap |> Map.tryFind capability |> Option.defaultValue false
+                clientSupportsLocalisationEdit <-
+                    supports "workspace.applyEdit"
+                    && supports "workspace.workspaceEdit.documentChanges"
+                    && supports "workspace.workspaceEdit.resourceOperations.create"
+
                 match p.initializationOptions with
                 | Some opt ->
+                    localisationOutputWorkspaceEdit <-
+                        opt.TryGetProperty("localisationOutput") = Some(JsonValue.String "workspaceEdit")
+
                     match opt.Item("language") with
                     | JsonValue.String "stellaris" -> activeGame <- STL
                     | JsonValue.String "hoi4" -> activeGame <- HOI4
@@ -1546,7 +1621,12 @@ type Server(client: ILanguageClient) =
                             arguments = x :: _ } ->
                             let les =
                                 game.LocalisationErrors(true, true)
-                                |> List.filter (fun e -> e.range |> (fun a -> a.FileName = x.AsString()))
+                                |> List.filter (fun e ->
+                                    String.Equals(
+                                        Path.GetFullPath(e.range.FileName),
+                                        Path.GetFullPath(x.AsString()),
+                                        StringComparison.OrdinalIgnoreCase
+                                    ))
 
                             let keys =
                                 les
@@ -1557,12 +1637,15 @@ type Server(client: ILanguageClient) =
 
                             let text = String.Join(Environment.NewLine, keys)
 
-                            client.CustomNotification(
-                                "createVirtualFile",
-                                JsonValue.Record
-                                    [| "uri", JsonValue.String("cwtools://1")
-                                       "fileContent", JsonValue.String(text) |]
-                            )
+                            if localisationOutputWorkspaceEdit then
+                                generateLocalisationEdit ("cwtools_" + Path.GetFileNameWithoutExtension(x.AsString())) keys
+                            else
+                                client.CustomNotification(
+                                    "createVirtualFile",
+                                    JsonValue.Record
+                                        [| "uri", JsonValue.String("cwtools://1")
+                                           "fileContent", JsonValue.String(text) |]
+                                )
 
                             None
                         | { command = "genlocall"; arguments = _ } ->
@@ -1577,12 +1660,15 @@ type Server(client: ILanguageClient) =
 
                             let text = String.Join(Environment.NewLine, keys)
 
-                            client.CustomNotification(
-                                "createVirtualFile",
-                                JsonValue.Record
-                                    [| "uri", JsonValue.String("cwtools://1")
-                                       "fileContent", JsonValue.String(text) |]
-                            )
+                            if localisationOutputWorkspaceEdit then
+                                generateLocalisationEdit "cwtools_generated" keys
+                            else
+                                client.CustomNotification(
+                                    "createVirtualFile",
+                                    JsonValue.Record
+                                        [| "uri", JsonValue.String("cwtools://1")
+                                           "fileContent", JsonValue.String(text) |]
+                                )
 
                             None
                         | { command = "debugrules"

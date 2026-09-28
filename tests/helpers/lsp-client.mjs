@@ -67,9 +67,15 @@ export async function startServer(t, { noRoot = false, initialize = true } = {})
             fail(error);
         }
     });
-    function send(method, params, id) {
-        const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', method, params, ...(id === undefined ? {} : { id }) }));
+    function sendMessage(message) {
+        const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', ...message }));
         child.stdin.write(Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`), body]));
+    }
+    function send(method, params, id) {
+        sendMessage({ method, params, ...(id === undefined ? {} : { id }) });
+    }
+    function reply(id, result) {
+        sendMessage({ id, result });
     }
     function waitFor(predicate, from = 0) {
         return new Promise((resolve, reject) => {
@@ -110,5 +116,5 @@ export async function startServer(t, { noRoot = false, initialize = true } = {})
         await waitFor(message => message.id === 1);
         send('initialized', {});
     }
-    return { send, waitFor, received, settings, initialization, root, child, closed, uri: pathToFileURL(file).href };
+    return { send, reply, waitFor, received, settings, initialization, root, child, closed, uri: pathToFileURL(file).href };
 }
