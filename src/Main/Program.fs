@@ -258,6 +258,12 @@ type Server(client: ILanguageClient) =
                     None
                 else
                     docs.GetText(FileInfo(doc.LocalPath))
+                    |> Option.map (fun text ->
+                        // File.ReadAllText strips a UTF-8 BOM; buffers must reach the YAML parser the same way.
+                        if name.EndsWith(".yml") && text.Length > 0 && text.[0] = '\uFEFF' then
+                            text.Substring(1)
+                        else
+                            text)
 
             let getRange (start: Position) (endp: Position) =
                 mkRange

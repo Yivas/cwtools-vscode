@@ -5,16 +5,16 @@ import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { startServer } from './helpers/lsp-client.mjs';
 
-for (const languageId of ['yaml', 'plaintext']) {
-    test(`diagnoses unsaved localisation changes with ${languageId}`, { timeout: 30000 }, async t => {
+for (const [languageId, bom] of [['yaml', false], ['plaintext', false], ['yaml', true], ['plaintext', true]]) {
+    test(`diagnoses unsaved localisation changes with ${languageId}${bom ? ' and BOM' : ''}`, { timeout: 30000 }, async t => {
         const client = await startServer(t, { initialize: false });
         const folder = path.join(client.root, 'localisation');
         await mkdir(folder);
         const file = path.join(folder, 'fixture_l_english.yml');
         const uri = pathToFileURL(file).href;
-        const valid = 'l_english:\n fixture_key:0 "Fixture text"\n';
-        const invalid = 'l_english:\n fixture_key:0 "Unclosed text\n';
-        const diskText = `\uFEFF${valid}`;
+        const valid = `${bom ? '\uFEFF' : ''}l_english:\n fixture_key:0 "Fixture text"\n`;
+        const invalid = `${bom ? '\uFEFF' : ''}l_english:\n fixture_key:0 "Unclosed text\n`;
+        const diskText = `\uFEFF${valid.replace(/^\uFEFF/, '')}`;
         await writeFile(file, diskText);
         client.initialization.initializationOptions.cwtools = client.settings;
         client.send('initialize', client.initialization, 1);
