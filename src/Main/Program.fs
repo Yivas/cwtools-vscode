@@ -274,23 +274,31 @@ type Server(client: ILanguageClient) =
                     | _, Failure(msg, p, _) ->
                         [ ("CW001", Severity.Error, name, msg, (getRange p.Position p.Position), 0, None) ]
 
+            let updateErrors =
+                match gameObj with
+                | None -> []
+                | Some game ->
+                    let results = game.UpdateFile shallowAnalyze name filetext
+
+                    if name.EndsWith(".yml") then
+                        // UpdateFile changes localisation sources, but not their processed diagnostics.
+                        game.RefreshLocalisationCaches()
+                        locCache <-
+                            game.LocalisationErrors(true, true)
+                            |> List.groupBy _.range.FileName
+                            |> Map.ofList
+
+                    results
+                    |> List.map (fun e ->
+                        (e.code, e.severity, e.range.FileName, e.message, e.range, e.keyLength, e.relatedErrors))
+
             let locErrors =
                 locCache.TryFind(doc.LocalPath)
                 |> Option.defaultValue []
                 |> List.map (fun e ->
                     (e.code, e.severity, e.range.FileName, e.message, e.range, e.keyLength, e.relatedErrors))
-            // logDiag (sprintf "lint le %A" (locCache.TryFind (doc.LocalPath) |> Option.defaultValue []))
-            let errors =
-                parserErrors
-                @ locErrors
-                @ match gameObj with
-                  | None -> []
-                  | Some game ->
-                      let results = game.UpdateFile shallowAnalyze name filetext
-                      // logDiag (sprintf "lint uf %A" results)
-                      results
-                      |> List.map (fun e ->
-                          (e.code, e.severity, e.range.FileName, e.message, e.range, e.keyLength, e.relatedErrors))
+
+            let errors = parserErrors @ locErrors @ updateErrors
 
             match errors with
             | [] -> client.PublishDiagnostics { uri = doc; diagnostics = [] }
